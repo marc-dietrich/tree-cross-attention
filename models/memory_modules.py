@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import numpy as np
+from torch import nn, einsum
 from models.attention_modules import *
 import math
 from models.aggregator_modules import TransformerAggregator
@@ -82,6 +83,9 @@ class TreeMemory(Memory):
         aggregator_type,
     ):
         super(TreeMemory, self).__init__()
+        self.mlps = nn.ModuleList([nn.Linear(in_features=64, out_features=64).to("cuda")  for _ in range(6)])
+
+
         self.norm_first = norm_first
         if norm_first:
             Norm = PreNorm
@@ -121,6 +125,8 @@ class TreeMemory(Memory):
             FeedForward(d_model, dim_feedforward=dim_feedforward, dropout=dropout),
         )
 
+        if self.training:
+            self.mse_mlp_loss = 0.0
 
     def setup_data(self, layer_data):
         self.tree_generator(layer_data)
@@ -227,6 +233,20 @@ class TreeMemory(Memory):
 
         self.train_tree_data = list(reversed(self.train_tree_data))
 
+        # flattened_query_data,
+        # key=layer_data_embeddings,
+        # nn.Linear(B*M, 2, 64)
+        device = self.train_tree_data[0][0].device
+        self.mlps = nn.ModuleList([nn.Linear(in_features=D, out_features=D).to(device)  for _ in self.train_tree_data[1:-1]])
+
+    def check(sefl, i, tensor):
+        if torch.any(torch.isnan(tensor)) or torch.any(torch.isinf(tensor)):
+            print(f"{i} Warning: Tensor contains NaN or Inf values.")
+            
+        # Check if there are any negative values
+        if torch.any(tensor < 0):
+            print(f"{i} Warning: Tensor contains negative values.")
+
     def retrieve(self, query_data):
         entropy_att_scores_list = []
         log_branch_sel_prob_list = []
@@ -324,6 +344,23 @@ class TreeMemory(Memory):
 
             N_i = layer_data_embeddings.shape[1]  # b 
 
+            #self.check(i, layer_data_embeddings)
+            # run MLP model
+            projected_layer_data_embdeddings = self.mlps[i](layer_data_embeddings)
+
+            #self.check(i, projected_layer_data_embdeddings)
+            #'BM b D, BM D 1 -> BM b 1', 
+            decision_tensor = torch.einsum('bnd,bmd->bnm', projected_layer_data_embdeddings, flattened_query_data)
+
+            #self.check(i, decision_tensor)
+            level_search_att_weight_mean_nodes = rearrange(decision_tensor, 'BM b 1 -> BM 1 b')
+            #self.check(i, level_search_att_weight_mean_nodes)
+
+            #level_search_att_weight_mean_nodes = decision_tensor
+            #print(level_search_att_weight_mean_nodes.shape, decision_tensor.shape)
+            # self.mse_mlp_loss += F.mse_loss(level_search_att_weight_mean_nodes, decision_tensor)
+
+            """
             _, level_search_att_weight_mean_nodes, search_att_weight = self.query_model(
                 flattened_query_data,
                 key=layer_data_embeddings,
@@ -331,11 +368,36 @@ class TreeMemory(Memory):
                 src_mask=rearrange(layer_data_mask, 'BM b 1 -> BM 1 b'),
                 return_info=True,
             )# [B*M, 1, b]
+
+            mode = "train_mlp"
+            if mode == "train_mlp":
+
+                # run MLP model
+                projected_layer_data_embdeddings = self.mlps[i](layer_data_embeddings)
+
+                #'BM b D, BM D 1 -> BM b 1', 
+                decision_tensor = torch.einsum('bnd,bmd->bnm', projected_layer_data_embdeddings, flattened_query_data)
+                                
+                decision_tensor = rearrange(decision_tensor, 'BM b 1 -> BM 1 b')
+
+                #print(level_search_att_weight_mean_nodes.shape, decision_tensor.shape)
+                self.mse_mlp_loss += F.mse_loss(level_search_att_weight_mean_nodes, decision_tensor)
+            else:
+                # todo: remove/replace by mlps
+                    _, level_search_att_weight_mean_nodes, search_att_weight = self.query_model(
+                    flattened_query_data,
+                    key=layer_data_embeddings,
+                    value=layer_data_embeddings,
+                    src_mask=rearrange(layer_data_mask, 'BM b 1 -> BM 1 b'),
+                    return_info=True,
+                ) # [B*M, 1, b]
+            """
+
                 
             # Select the next node to expand
             if self.training:
                 # Stochastic selection
-                selected_indices = torch.multinomial(level_search_att_weight_mean_nodes.flatten(0, 1), 1)
+                selected_indices = torch.multinomial(torch.softmax(level_search_att_weight_mean_nodes.flatten(0, 1), dim=1), 1)
             else:  
                 # Greedily (deterministically) select the nodes to expand
                 selected_indices = level_search_att_weight_mean_nodes.flatten(0, 1).max(-1)[1].unsqueeze(-1)
@@ -359,12 +421,23 @@ class TreeMemory(Memory):
             if self.training:
                 # Compute Entropy Bonus Entropy Bonus
                 entropy_att_scores_list.append(
+                    -level_search_att_weight_mean_nodes[-1] * torch.log(torch.clamp(level_search_att_weight_mean_nodes[-1], min=1e-9)).sum()
+                )
+                """(
+                    entropy_att_scores_list.append(
                     (-search_att_weight * torch.log(search_att_weight + 1e-9)).sum(-1)
-                ) 
+                )"""
+                
                 # Compute action log probabilities
-                log_branch_sel_prob = torch.log(level_search_att_weight_mean_nodes.squeeze(1)[
-                        torch.arange(B * M, device="cuda"), selected_indices.flatten()
-                    ].squeeze(-1))
+                # Ensure the selected indices correspond to positive values before taking log
+                log_branch_sel_prob_values = level_search_att_weight_mean_nodes.squeeze(1)[
+                    torch.arange(B * M, device="cuda"), selected_indices.flatten()
+                ].squeeze(-1)
+
+                # Clamp the values to avoid taking log of 0 or negative values
+                log_branch_sel_prob_values_clamped = torch.clamp(log_branch_sel_prob_values, min=1e-9)
+
+                log_branch_sel_prob = torch.log(log_branch_sel_prob_values_clamped)
                 log_branch_sel_prob_list.append(log_branch_sel_prob)
 
         # Aggregate the selected nodes
@@ -383,6 +456,8 @@ class TreeMemory(Memory):
 
         # Reshape the embedding to the correct representation for Attention
         pred_emb = pred_emb.reshape(B, M, D)
+
+        #print(f"MSE Loss: {self.mse_mlp_loss.item()}")
 
         return pred_emb, entropy_att_scores_list, log_branch_sel_prob_list
 

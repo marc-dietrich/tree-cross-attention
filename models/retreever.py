@@ -28,6 +28,9 @@ from models.positional_encoding import PositionalEncoding
 
 
 class Retreever(nn.Module):
+
+    MODE = ""
+
     def __init__(
         self,
         dim_x,
@@ -284,7 +287,7 @@ class Retreever(nn.Module):
         else:
             return self.predictor(encoding)
 
-    def forward(self, batch):  # Computes Training Loss
+    def forward(self, batch, mode):  # Computes Training Loss
         if self.is_metalearning:
             context_memory_block = self.process_context(batch.xc, batch.yc)
         else:
@@ -307,6 +310,7 @@ class Retreever(nn.Module):
         outs = AttrDict()
         outs = self.tca_loss(outs, tca_prediction, batch.yt)
 
+
         if self.training and self.decoder_type == "tca":
             outs = self.tca_leaf_loss(outs, tca_leaf_prediction, batch.yt)
             outs = self.rl_loss(
@@ -317,6 +321,9 @@ class Retreever(nn.Module):
                 + self.ca_loss_weight * outs.tca_leaf_loss
                 + self.rl_loss_weight * outs.rl_loss
             )
+
+            if mode == "train_mlp":
+                outs.loss = self.processor.memory_block.mse_mlp_loss
         else:
             outs.loss = outs.tca_loss
 

@@ -118,9 +118,18 @@ def main():
 
     if args.mode == "train":
         train(args, model)
+    if args.mode == "train_mlp":
+        args.resume = True
+        train(args, model)
     elif args.mode == "eval":
         eval(args, model)
 
+def freeze_weights_except(layer_names, model):
+    for name, param in model.named_parameters():
+        if any(ln in name for ln in layer_names):
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
 
 def train(args, model):
     if osp.exists(args.root + "/ckpt.tar"):
@@ -158,10 +167,26 @@ def train(args, model):
     if args.resume:
         ckpt = torch.load(os.path.join(args.root, "ckpt.tar"))
         model.load_state_dict(ckpt.model)
-        optimizer.load_state_dict(ckpt.optimizer)
-        scheduler.load_state_dict(ckpt.scheduler)
         logfilename = ckpt.logfilename
-        start_step = ckpt.step
+
+        if args.mode == "train":
+            optimizer.load_state_dict(ckpt.optimizer)
+            scheduler.load_state_dict(ckpt.scheduler)
+            start_step = ckpt.step
+        elif args.mode == "train_mlp":
+            print(model.parameters())
+
+            # Freeze all layers except specified MLP layers
+            freeze_weights_except([f"mlps.{i}" for i in range(len(model.processor.memory_block.mlps))], model)
+            optimizer = torch.optim.Adam(
+                filter(lambda p: p.requires_grad, model.parameters()),
+                lr=args.lr,
+                weight_decay=args.wd,
+                betas=(args.beta_1, args.beta_2),
+            )
+            start_step = 1
+        else:
+            raise RuntimeError("invalid mode")
     else:
         logfilename = os.path.join(
             args.root, f'train_{time.strftime("%Y%m%d-%H%M")}.log'
@@ -184,7 +209,7 @@ def train(args, model):
         optimizer.zero_grad()
         batch = sampler.sample(batch_size=args.train_batch_size, device="cuda")
 
-        outs = model(batch)
+        outs = model(batch, mode=args.mode)
 
         outs.loss.backward()
 
@@ -281,7 +306,7 @@ def eval(args, model):
             model.reset()
             for key, val in batch.items():
                 batch[key] = val.cuda()
-            outs = model(batch)
+            outs = model(batch, mode=args.mode)
 
             for key, val in outs.items():
                 ravg.update(key, val)
