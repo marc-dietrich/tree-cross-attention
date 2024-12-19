@@ -325,7 +325,8 @@ class Retreever(nn.Module):
             if mode == "train_mlp":
                 outs.loss = self.processor.memory_block.mse_mlp_loss
         else:
-            outs.loss = outs.tca_loss
+            if self.decoder_type == "tca":
+                outs.loss = outs.tca_loss
 
         return outs
 

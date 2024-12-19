@@ -420,8 +420,9 @@ class TreeMemory(Memory):
             # Compute additional terms for training
             if self.training:
                 # Compute Entropy Bonus Entropy Bonus
+                probabilities = torch.softmax(level_search_att_weight_mean_nodes, dim=-1)
                 entropy_att_scores_list.append(
-                    -level_search_att_weight_mean_nodes[-1] * torch.log(torch.clamp(level_search_att_weight_mean_nodes[-1], min=1e-9)).sum()
+                    (-probabilities * torch.log(probabilities + 1e-9)).sum(-1)
                 )
                 """(
                     entropy_att_scores_list.append(
@@ -435,9 +436,10 @@ class TreeMemory(Memory):
                 ].squeeze(-1)
 
                 # Clamp the values to avoid taking log of 0 or negative values
-                log_branch_sel_prob_values_clamped = torch.clamp(log_branch_sel_prob_values, min=1e-9)
+                # print("shape", log_branch_sel_prob_values.shape)
+                log_branch_sel_prob_values_softmax = torch.softmax(log_branch_sel_prob_values, dim=0)
 
-                log_branch_sel_prob = torch.log(log_branch_sel_prob_values_clamped)
+                log_branch_sel_prob = torch.log(log_branch_sel_prob_values_softmax + 1e-9)
                 log_branch_sel_prob_list.append(log_branch_sel_prob)
 
         # Aggregate the selected nodes
