@@ -82,6 +82,9 @@ class TreeMemory(Memory):
         aggregator_type,
     ):
         super(TreeMemory, self).__init__()
+        self.mlps = nn.ModuleList([nn.Linear(in_features=64, out_features=64, bias=False).to("cuda")  for _ in range(6)])
+        self.mean_mlp_loss = {i:(0, 0.0) for i in range(6)}
+
         self.norm_first = norm_first
         if norm_first:
             Norm = PreNorm
@@ -231,7 +234,7 @@ class TreeMemory(Memory):
         entropy_att_scores_list = []
         log_branch_sel_prob_list = []
 
-        pred_emb, entropy_att_scores_list, log_branch_sel_prob_list = (
+        pred_emb, entropy_att_scores_list, log_branch_sel_prob_list  = (
             self.tree_retrieval(query_data)
         )
 
@@ -253,7 +256,29 @@ class TreeMemory(Memory):
             else:
                 leaf_ret_emb = self.query_ff(leaf_pred_emb)
 
-            return ret_emb, leaf_ret_emb, entropy_scores, log_action_probs
+            return ret_emb, leaf_ret_emb, entropy_scores, log_action_probs, self.mean_mlp_loss
+        
+    def use_mlps(self, i, flattened_query_data, layer_data_embeddings):
+        #self.check(i, layer_data_embeddings)
+
+        # run MLP model
+        projected_layer_data_embdeddings = self.mlps[i](layer_data_embeddings)
+
+        #self.check(i, projected_layer_data_embdeddings)
+        #'BM b D, BM D 1 -> BM b 1', 
+        decision_tensor = torch.einsum('bnd,bmd->bnm', projected_layer_data_embdeddings, flattened_query_data)
+
+        #self.check(i, decision_tensor)
+        decision_tensor = rearrange(decision_tensor, 'BM b 1 -> BM 1 b')
+        #self.check(i, level_search_att_weight_mean_nodes)
+        return decision_tensor
+
+    def track_mlp_loss(self, i, loss):
+        # Update mean loss using the recursive formula
+        count, mean = self.mean_mlp_loss[i]
+        count += 1
+        mean += (loss - mean) / count
+        self.mean_mlp_loss[i] = (count, mean)
 
     def tree_retrieval(self, query_data):
         device = query_data.device
@@ -324,14 +349,36 @@ class TreeMemory(Memory):
 
             N_i = layer_data_embeddings.shape[1]  # b 
 
-            _, level_search_att_weight_mean_nodes, search_att_weight = self.query_model(
-                flattened_query_data,
-                key=layer_data_embeddings,
-                value=layer_data_embeddings,
-                src_mask=rearrange(layer_data_mask, 'BM b 1 -> BM 1 b'),
-                return_info=True,
-            )# [B*M, 1, b]
-                
+            if self.training:
+                _, level_search_att_weight_mean_nodes, search_att_weight = self.query_model(
+                    flattened_query_data,
+                    key=layer_data_embeddings,
+                    value=layer_data_embeddings,
+                    src_mask=rearrange(layer_data_mask, 'BM b 1 -> BM 1 b'),
+                    return_info=True,
+                )
+
+                flattened_query_data_copy = flattened_query_data.clone().detach()
+                layer_data_embeddings_copy = layer_data_embeddings.clone().detach()
+                level_search_att_weight_mean_nodes_copy = level_search_att_weight_mean_nodes.clone().detach()
+
+                # Forward pass for the i-th MLP layer
+                decision_tensor = self.use_mlps(i, flattened_query_data_copy, layer_data_embeddings_copy)
+                loss = F.mse_loss(level_search_att_weight_mean_nodes_copy, decision_tensor)
+
+                # Track the loss (optional)
+                self.track_mlp_loss(i, loss)
+                loss.backward()
+            else:
+                level_search_att_weight_mean_nodes = self.use_mlps(i, flattened_query_data, layer_data_embeddings)
+                """_, level_search_att_weight_mean_nodes, search_att_weight = self.query_model(
+                    flattened_query_data,
+                    key=layer_data_embeddings,
+                    value=layer_data_embeddings,
+                    src_mask=rearrange(layer_data_mask, 'BM b 1 -> BM 1 b'),
+                    return_info=True,
+                )"""
+                    
             # Select the next node to expand
             if self.training:
                 # Stochastic selection

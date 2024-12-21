@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import time
 import torch
 import torch.nn as nn
 
@@ -28,6 +29,9 @@ from models.positional_encoding import PositionalEncoding
 
 
 class Retreever(nn.Module):
+
+    DECODER_EXEC_TIMES = []
+
     def __init__(
         self,
         dim_x,
@@ -292,22 +296,27 @@ class Retreever(nn.Module):
 
         query_embedding = self.query_embedder(batch.xt)
 
+        start = time.time()
         if self.decoder_type == "tca":
             if self.training:
-                tca_encoding, tca_leaf_encoding, entropy, log_action_probs = self.decoder(query_embedding, context_memory_block)
+                tca_encoding, tca_leaf_encoding, entropy, log_action_probs, mean_mlp_loss = self.decoder(query_embedding, context_memory_block)
             else:
                 tca_encoding = self.decoder(query_embedding, context_memory_block)
         else:
             tca_encoding = self.decoder(query_embedding, context_memory_block)
+        end = time.time()
 
         tca_prediction = self.make_prediction(tca_encoding)
         if self.training and self.decoder_type == "tca":
             tca_leaf_prediction = self.make_prediction(tca_leaf_encoding)
 
         outs = AttrDict()
+        outs.decoder_exec_time = end - start
         outs = self.tca_loss(outs, tca_prediction, batch.yt)
 
         if self.training and self.decoder_type == "tca":
+            outs.mlp_loss = sum([abs(loss) for count, loss in mean_mlp_loss.values()])
+
             outs = self.tca_leaf_loss(outs, tca_leaf_prediction, batch.yt)
             outs = self.rl_loss(
                 outs, tca_prediction, batch.yt, log_action_probs, entropy
@@ -318,7 +327,8 @@ class Retreever(nn.Module):
                 + self.rl_loss_weight * outs.rl_loss
             )
         else:
-            outs.loss = outs.tca_loss
+            if self.decoder_type == "tca":
+                outs.loss = outs.tca_loss
 
         return outs
 

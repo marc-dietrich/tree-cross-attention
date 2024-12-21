@@ -39,8 +39,9 @@ class TCADecoderLayer(DecoderLayer):
                 x_tca_leaf,
                 entropy_scores,
                 log_action_probs,
+                mean_mlp_loss
             ) = context_memory.retrieve(query_encodings)
-            return x_tca, x_tca_leaf, entropy_scores, log_action_probs
+            return x_tca, x_tca_leaf, entropy_scores, log_action_probs, mean_mlp_loss
         else:
             x_tca = context_memory.retrieve(query_encodings)
             return x_tca
@@ -84,8 +85,8 @@ class TCADecoder(Decoder):
     def forward(self, query_encodings, context_memory):
         x = query_encodings
         if self.training:
-            x_tca, x_tca_leaf, entropy_scores, log_action_probs = self.layer(x, context_memory)
-            return x_tca, x_tca_leaf, entropy_scores, log_action_probs
+            x_tca, x_tca_leaf, entropy_scores, log_action_probs, mean_mlp_loss = self.layer(x, context_memory)
+            return x_tca, x_tca_leaf, entropy_scores, log_action_probs, mean_mlp_loss
         else:
             x = self.layer(x, context_memory)
             return x

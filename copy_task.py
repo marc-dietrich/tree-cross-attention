@@ -24,6 +24,9 @@ from utils.misc import load_module
 from utils.paths import results_path, evalsets_path
 from utils.log import get_logger, RunningAverage
 
+from models.retreever import Retreever
+import numpy as np
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -145,8 +148,23 @@ def train(args, model):
         seed=args.train_seed,
         num_chars=args.num_chars,
     )
+
+    # Filter parameters by name
+    mlp_parameter = [
+        param for name, param in model.named_parameters() if "processor.memory_block.mlps" in name
+    ]
+    non_mlp_parameter = [
+        param for name, param in model.named_parameters() if not "processor.memory_block.mlps" in name
+    ]
+
+    if mlp_parameter:
+        optimizer_mlp = torch.optim.Adam(
+            mlp_parameter,  # For example, another part of the model
+            lr=args.lr,  # Different learning rate if needed
+        )
+
     optimizer = torch.optim.Adam(
-        model.parameters(),
+        non_mlp_parameter,
         lr=args.lr,
         weight_decay=args.wd,
         betas=(args.beta_1, args.beta_2),
@@ -155,7 +173,14 @@ def train(args, model):
         optimizer, T_max=args.num_steps
     )
 
+    if mlp_parameter:
+        scheduler_mlp = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer_mlp, T_max=args.num_steps 
+        )
+
+
     if args.resume:
+        raise RuntimeError("No resume possible yet!")
         ckpt = torch.load(os.path.join(args.root, "ckpt.tar"))
         model.load_state_dict(ckpt.model)
         optimizer.load_state_dict(ckpt.optimizer)
@@ -181,7 +206,11 @@ def train(args, model):
 
         model.reset()
         model.train()
+
+        if mlp_parameter:
+            optimizer_mlp.zero_grad()
         optimizer.zero_grad()
+
         batch = sampler.sample(batch_size=args.train_batch_size, device="cuda")
 
         outs = model(batch)
@@ -190,8 +219,14 @@ def train(args, model):
 
         if args.clip is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
+
         optimizer.step()
+        if mlp_parameter:
+            optimizer_mlp.step()
+
         scheduler.step()
+        if mlp_parameter:
+            scheduler_mlp.step()
 
         for key, val in outs.items():
             ravg.update(key, val)
@@ -199,6 +234,7 @@ def train(args, model):
         if step % args.print_freq == 0:
             line = f"Retreever:{args.expid} step {step} "
             line += f'lr {optimizer.param_groups[0]["lr"]:.3e} '
+            #line += f'lr-mlp {optimizer_mlp.param_groups[0]["lr"]:.3e} '
             line += f"[train_loss] "
             line += ravg.info()
             logger.info(line)
@@ -276,12 +312,16 @@ def eval(args, model):
 
     ravg = RunningAverage()
     model.eval()
+    decoder_exex_times = []
     with torch.no_grad():
         for batch in tqdm(eval_batches, ascii=True):
             model.reset()
             for key, val in batch.items():
                 batch[key] = val.cuda()
             outs = model(batch)
+
+            decoder_exex_times.append(outs.decoder_exec_time)
+            del outs["decoder_exec_time"]
 
             for key, val in outs.items():
                 ravg.update(key, val)
@@ -295,6 +335,7 @@ def eval(args, model):
     if logger is not None:
         logger.info(line)
 
+    print("Mean | Median decoder execution time: ", np.mean(decoder_exex_times), "|", np.median(decoder_exex_times))
     return line
 
 
