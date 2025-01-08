@@ -258,18 +258,24 @@ class TreeMemory(Memory):
 
             return ret_emb, leaf_ret_emb, entropy_scores, log_action_probs, self.mean_mlp_loss
         
-    def use_mlps(self, i, flattened_query_data, layer_data_embeddings):
-        #self.check(i, layer_data_embeddings)
+    def use_mlps(self, i, query_data, layer_data_embeddings):
+        #self.check(i, layer_data_embeddings
 
         # run MLP model
+        # (16, 2, 64)
         projected_layer_data_embdeddings = self.mlps[i](layer_data_embeddings)
 
         #self.check(i, projected_layer_data_embdeddings)
-        #'BM b D, BM D 1 -> BM b 1', 
-        decision_tensor = torch.einsum('bnd,bmd->bnm', projected_layer_data_embdeddings, flattened_query_data)
+        #B b D, B M D -> B b M'
+        decision_tensor = torch.einsum('bnd,bmd->bnm', projected_layer_data_embdeddings, query_data)
 
+        # B b M -> B b 1
+        linear_layer = nn.Linear(decision_tensor.shape[-1], 1).to("cuda")
+        decision_tensor = linear_layer(decision_tensor)
         #self.check(i, decision_tensor)
-        decision_tensor = rearrange(decision_tensor, 'BM b 1 -> BM 1 b')
+
+
+        decision_tensor = rearrange(decision_tensor, 'B b 1 -> B 1 b')
         #self.check(i, level_search_att_weight_mean_nodes)
         return decision_tensor
 
@@ -284,11 +290,11 @@ class TreeMemory(Memory):
         device = query_data.device
         batch_size, nQueries = query_data.shape[0], query_data.shape[1]
         B = batch_size
-        M = nQueries
+        #M = nQueries
         D = self.train_tree_data[0][0].shape[-1]
 
         filtered_tree_data = self.train_tree_data[1:]
-        flattened_query_data = query_data.flatten(0, 1).unsqueeze(1)  # [B*M, 1, D]
+        # query_data [B, M, D]
 
         entropy_att_scores_list = []
         log_branch_sel_prob_list = []
@@ -297,80 +303,42 @@ class TreeMemory(Memory):
         
         for i in range(len(filtered_tree_data)):
             (layer_data_embeddings, layer_data_mask) = filtered_tree_data[i]
-            if i == 0:
-                # Root Node
-                layer_data_embeddings = repeat(layer_data_embeddings, 'B b d -> B M b d', M = M)
-                layer_data_embeddings = rearrange(layer_data_embeddings, 'B M b d -> (B M) b d')
-                # [B*M, N_0, D]
 
-                layer_data_mask = repeat(layer_data_mask, 'B b d -> B M b d', M = M)
-                layer_data_mask = rearrange(layer_data_mask, 'B M b d -> (B M) b d')
-                # [B*M, N_0, 1]
+            layer_data_embeddings = torch.ones(B,  2, D).to("cuda")    # Initialized with ones
+            layer_data_mask = torch.ones(B,  2, 1).to("cuda")     # Initialized with ones    
 
-                N_0 = layer_data_embeddings.shape[1]
-                layer_data_indices = repeat(torch.arange(N_0, device=device), 'n -> b n', b = B*M)
-                # [B*M, N_0]
-            else:
-                # Leaf or intermediate Nodes
-                # layer_data_embeddings: [B, b, b, b, D]
-                layer_data_embeddings = rearrange(layer_data_embeddings, 'ba ... b D -> ba (...) b D')
-                layer_data_mask = rearrange(layer_data_mask, 'ba ... b D -> ba (...) b D')
+            if i == len(filtered_tree_data) - 1:
+                selected_data_embeddings.append(layer_data_embeddings)
+                selected_data_masks.append(layer_data_mask)
+                break
 
-                next_branch_size = layer_data_embeddings.shape[-2]
-
-                repeated_idxes = repeat(torch.arange(B, device=device), 'n -> n k', k = M).flatten()
-                # [B*M]: [0,1,...,B, 0,1,...,B, ]
-
-                # next_layer_data_indices: [B*M, 1]
-                layer_data_embeddings = layer_data_embeddings[
-                    repeated_idxes, next_layer_data_indices.flatten()
-                ].reshape(B * M, 1, next_branch_size, D)
-                layer_data_mask = layer_data_mask[
-                    repeated_idxes, next_layer_data_indices.flatten()
-                ].reshape(B * M, 1, next_branch_size, 1)
-
-                layer_data_embeddings = rearrange(layer_data_embeddings, 'B a c D -> B (a c) D')
-                # [B, b, D]
-                layer_data_mask = rearrange(layer_data_mask, 'B a c D -> B (a c) D')
-                # [B, b, 1]
-
-                if i == len(filtered_tree_data) - 1:
-                    selected_data_embeddings.append(layer_data_embeddings)
-                    selected_data_masks.append(layer_data_mask)
-                    break
-
-
-                # Track indices of selected nodes
-                tmp_indices = rearrange(torch.arange(next_branch_size, device=device), 'b -> 1 1 b') # [1, 1, b]
-
-                layer_data_indices = repeat(next_layer_data_indices * next_branch_size, 'B M -> B M b', b = next_branch_size) + tmp_indices
-                layer_data_indices = rearrange(layer_data_indices, 'B M b -> (B M) b')
-                # layer_data_indices: [B*M, b]
-
-            N_i = layer_data_embeddings.shape[1]  # b 
+            # TODO: adjust tree-construction --> only allow binary
+            N_i = 2 #layer_data_embeddings.shape[1]
 
             if self.training:
                 _, level_search_att_weight_mean_nodes, search_att_weight = self.query_model(
-                    flattened_query_data,
+                    query_data,
                     key=layer_data_embeddings,
                     value=layer_data_embeddings,
-                    src_mask=rearrange(layer_data_mask, 'BM b 1 -> BM 1 b'),
+                    src_mask=rearrange(layer_data_mask, 'B b 1 -> B 1 b'),
                     return_info=True,
                 )
 
-                flattened_query_data_copy = flattened_query_data.clone().detach()
+                level_search_att_weight_mean_nodes = torch.rand(B, 1, 2).to("cuda")
+
+                query_data_copy = query_data.clone().detach()
                 layer_data_embeddings_copy = layer_data_embeddings.clone().detach()
                 level_search_att_weight_mean_nodes_copy = level_search_att_weight_mean_nodes.clone().detach()
 
                 # Forward pass for the i-th MLP layer
-                decision_tensor = self.use_mlps(i, flattened_query_data_copy, layer_data_embeddings_copy)
+                decision_tensor = self.use_mlps(i, query_data_copy, layer_data_embeddings_copy)
                 loss = F.mse_loss(level_search_att_weight_mean_nodes_copy, decision_tensor)
 
                 # Track the loss (optional)
                 self.track_mlp_loss(i, loss)
                 loss.backward()
             else:
-                level_search_att_weight_mean_nodes = self.use_mlps(i, flattened_query_data, layer_data_embeddings)
+                level_search_att_weight_mean_nodes = self.use_mlps(i, query_data, layer_data_embeddings)
                 """_, level_search_att_weight_mean_nodes, search_att_weight = self.query_model(
                     flattened_query_data,
                     key=layer_data_embeddings,
@@ -388,19 +356,20 @@ class TreeMemory(Memory):
                 selected_indices = level_search_att_weight_mean_nodes.flatten(0, 1).max(-1)[1].unsqueeze(-1)
 
             # Compute the mask for the selected/rejected nodes 
-            tree_search_level_embeddings = layer_data_embeddings.reshape(B*M, N_i, D)
-            tree_search_level_mask = (1 - F.one_hot(selected_indices, num_classes = N_i)).reshape(B*M, N_i, 1)
+            # tree_search_level_embeddings = layer_data_embeddings.reshape(B, N_i, D)
+            # Expand `selected_idx` to match the embedding dimensions
+            selected_idx_expanded = selected_indices.unsqueeze(-1).expand(-1, -1, 64)  # Shape: (16, 1, 64)
+
+            # Use `torch.gather` to collect embeddings based on `selected_idx`
+            tree_search_level_embeddings = torch.gather(layer_data_embeddings, dim=1, index=selected_idx_expanded)  # Shape: (16, 1, 64)
+            
+            #tree_search_level_mask = (1 - F.one_hot(selected_indices, num_classes = N_i)).reshape(B, N_i, 1)
+            tree_search_level_mask = (1 - rearrange(selected_indices, 'B 1 -> B 1 1'))
 
             # Add the level's node embeddings and mask
+
             selected_data_embeddings.append(tree_search_level_embeddings) # Add to "S"
             selected_data_masks.append(tree_search_level_mask)
-
-            # Compute next tree layer indices
-            next_layer_data_indices = layer_data_indices[
-                torch.arange(B * M, device="cuda"), selected_indices.flatten()
-            ].reshape(
-                B * M, 1
-            )
 
             # Compute additional terms for training
             if self.training:
@@ -408,10 +377,11 @@ class TreeMemory(Memory):
                 entropy_att_scores_list.append(
                     (-search_att_weight * torch.log(search_att_weight + 1e-9)).sum(-1)
                 ) 
-                # Compute action log probabilities
+                # Compute action log probabilities --> TODO: check here!
                 log_branch_sel_prob = torch.log(level_search_att_weight_mean_nodes.squeeze(1)[
-                        torch.arange(B * M, device="cuda"), selected_indices.flatten()
+                        torch.arange(B, device="cuda"), selected_indices.flatten()
                     ].squeeze(-1))
+                print("lbsp", log_branch_sel_prob.shape)
                 log_branch_sel_prob_list.append(log_branch_sel_prob)
 
         # Aggregate the selected nodes
@@ -420,8 +390,12 @@ class TreeMemory(Memory):
         
         # Using the aggregated nodes, compute the final embedding
         # pred_emb_pre_out: [B*M, 1, D], flattened_query_Data:[B*M, 1, D], search_data_embeddings: [B*M, N_i, D], search_masks: [B*M, 1, N_i]
+        print("sde:", search_data_embeddings.shape)
+        print("sdm:", search_data_masks.shape)
+
+        # TODO: check shapes within attention
         pred_emb = self.query_model(
-            flattened_query_data,
+            query_data,
             key=search_data_embeddings,
             value=search_data_embeddings,
             src_mask=search_data_masks,
@@ -429,7 +403,10 @@ class TreeMemory(Memory):
         )
 
         # Reshape the embedding to the correct representation for Attention
-        pred_emb = pred_emb.reshape(B, M, D)
+        # pred_emb = pred_emb.reshape(B, M, D)
+
+        print("pred emb", pred_emb.shape)
+        quit()
 
         return pred_emb, entropy_att_scores_list, log_branch_sel_prob_list
 

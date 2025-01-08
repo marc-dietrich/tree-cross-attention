@@ -39,7 +39,7 @@ def main():
     # Train
     parser.add_argument("--pretrain", action="store_true", default=False)
     parser.add_argument("--train_seed", type=int, default=0)
-    parser.add_argument("--train_batch_size", type=int, default=128)
+    parser.add_argument("--train_batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--wd", type=float, default=0.0)
     parser.add_argument("--clip", type=float, default=1.0)
