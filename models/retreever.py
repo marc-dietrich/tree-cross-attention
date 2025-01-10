@@ -400,9 +400,13 @@ class Retreever(nn.Module):
                     torch.tensor(prediction.shape[-1])
                 )  # -log(# classes)
             elif self.classification_rew_type == "acc":
+                #print("pred", prediction.shape)
                 _, pred_idxes = prediction.max(-1)
+                #print(yt.shape)
                 _, label_idxes = yt.max(-1)
-                rl_rew = (pred_idxes == label_idxes).float().detach().flatten()
+                #print(pred_idxes.shape, label_idxes.shape)
+                #print((pred_idxes == label_idxes).float().shape)
+                rl_rew = (pred_idxes == label_idxes).float().detach().mean(1).flatten()
                 baseline_value = torch.tensor(0)
             else:
                 raise NotImplementedError
@@ -410,6 +414,10 @@ class Retreever(nn.Module):
             raise NotImplementedError
         outs.entropy_bonus = entropy
         outs.log_action_probs = log_action_probs.mean()
+
+        #print([t.shape for t in [log_action_probs, rl_rew, baseline_value]])
+
+        #quit()
         outs.rl_loss = (
             -(log_action_probs * (rl_rew - baseline_value)).mean()
             - self.entropy_bonus_weight * entropy
