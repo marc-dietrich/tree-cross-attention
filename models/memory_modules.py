@@ -370,7 +370,33 @@ class TreeMemory(Memory):
         # Aggregate the selected nodes
         search_data_embeddings = torch.cat(selected_data_embeddings, dim=1)
         search_data_masks = torch.cat(selected_data_masks, dim=1).transpose(1, 2)
-        
+
+        # manuell set to true
+        if False:
+            # Reshape to [B, M, x, D]
+            reshaped_tensor = rearrange(search_data_embeddings, "(B M) x D -> B M x D", M=M)
+            reshaped_tensor = reshaped_tensor.reshape(B, M, -1)  # Flatten x and D for simplicity
+            diffs = torch.zeros(M, M, reshaped_tensor.shape[-1], device="cuda")
+
+            for b in range(1):
+                # Pairwise differences for all (i, j)
+                # -> [M, x*D]
+                for i in range(M):
+                    for j in range(M):
+                        diffs[i, j] = reshaped_tensor[b][i] - reshaped_tensor[b][j]
+
+                # Compute closeness using torch.isclose
+                is_close = torch.isclose(diffs, torch.zeros_like(diffs))  # Element-wise closeness
+                ratios = is_close.all(dim=-1).float()  # all close along x*D
+            
+                max_val = ratios.max().item()
+                min_val = ratios.min().item()
+                mean_val = ratios.mean().item()
+                median_val = ratios.median().item()
+                redundancy_count = ((ratios == 1.0).sum().item() - M) / 2
+
+                print(f"Batch {b} | Max: {max_val} | Min: {min_val} | Mean: {mean_val} | Median: {median_val} | Red: {redundancy_count}")
+                    
         # Using the aggregated nodes, compute the final embedding
         # pred_emb_pre_out: [B*M, 1, D], flattened_query_Data:[B*M, 1, D], search_data_embeddings: [B*M, N_i, D], search_masks: [B*M, 1, N_i]
         pred_emb = self.query_model(
